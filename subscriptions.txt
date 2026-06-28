@@ -1,0 +1,7 @@
+# One YouTube channel URL per line. Blank lines and # comments are ignored.
+# The daemon re-reads this file at the start of every poll cycle, so edits
+# take effect within ~1 poll interval without a restart.
+
+# Example (uncomment to subscribe):
+# https://www.youtube.com/@kurzgesagt
+# https://www.youtube.com/@SabineHossenfelder

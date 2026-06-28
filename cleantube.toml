@@ -1,0 +1,25 @@
+# Cleantube configuration. All keys are optional; defaults shown below.
+
+# Number of newest videos to fetch the first time a channel is seen.
+backfill_count = 3
+
+# Seconds between poll cycles.
+poll_interval_seconds = 3600
+
+# Seconds to wait after each successful download (rate-limit safety).
+post_download_cooldown_seconds = 1800
+
+# Where downloaded videos are written. Flat directory, no per-channel subdirs.
+download_dir = "./cleantube/downloaded"
+
+# yt-dlp format string.
+video_format = "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]"
+
+# How many failed attempts before a video is marked permanently_failed.
+max_download_attempts = 3
+
+# SQLite database path. Single source of truth for downloaded state.
+db_path = "./cleantube/cleantube.db"
+
+# Subscription file location (one channel URL per line, # comments allowed).
+subscriptions_path = "./subscriptions.txt"

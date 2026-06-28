@@ -1,0 +1,18 @@
+[project]
+name = "cleantube"
+version = "0.1.0"
+description = "Daemon that downloads new YouTube videos from subscribed channels with SponsorBlock cuts."
+requires-python = ">=3.11"
+dependencies = [
+    "yt-dlp>=2024.1.0",
+]
+
+[project.scripts]
+cleantube = "cleantube.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["cleantube"]
