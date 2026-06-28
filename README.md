@@ -31,4 +31,3 @@ https://www.youtube.com/@kurzgesagt
 https://www.youtube.com/@SabineHossenfelder
 ```
 
-In real use you want it under systemd. Something like:
