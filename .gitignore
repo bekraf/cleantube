@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Runtime state (default paths from cleantube.toml)
+cleantube/downloaded/
+cleantube/cleantube.db
+cleantube/cleantube.db-wal
+cleantube/cleantube.db-shm

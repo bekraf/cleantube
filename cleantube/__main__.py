@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -29,6 +30,11 @@ def main(argv: list[str] | None = None) -> int:
 
     setup_logging(level=args.log_level)
     log = logging.getLogger("cleantube")
+
+    missing = [tool for tool in ("yt-dlp", "ffmpeg") if shutil.which(tool) is None]
+    if missing:
+        log.error("missing_dependencies", extra={"tools": missing})
+        return 1
 
     config_path = Path(args.config)
     log.info("config_loading", extra={"path": str(config_path)})

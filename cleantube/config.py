@@ -1,6 +1,9 @@
+import logging
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+
+log = logging.getLogger("cleantube")
 
 
 @dataclass(frozen=True)
@@ -32,8 +35,10 @@ def load_config(path: Path) -> Config:
     if path.exists():
         with path.open("rb") as f:
             data = tomllib.load(f)
+    for key in sorted(set(data) - set(_DEFAULTS)):
+        log.warning("config_unknown_key", extra={"key": key})
     merged = {**_DEFAULTS, **data}
-    return Config(
+    config = Config(
         backfill_count=int(merged["backfill_count"]),
         poll_interval_seconds=int(merged["poll_interval_seconds"]),
         post_download_cooldown_seconds=int(merged["post_download_cooldown_seconds"]),
@@ -43,3 +48,12 @@ def load_config(path: Path) -> Config:
         db_path=Path(merged["db_path"]),
         subscriptions_path=Path(merged["subscriptions_path"]),
     )
+    if config.backfill_count < 0:
+        raise ValueError("backfill_count must be >= 0")
+    if config.poll_interval_seconds <= 0:
+        raise ValueError("poll_interval_seconds must be > 0")
+    if config.post_download_cooldown_seconds < 0:
+        raise ValueError("post_download_cooldown_seconds must be >= 0")
+    if config.max_download_attempts < 1:
+        raise ValueError("max_download_attempts must be >= 1")
+    return config

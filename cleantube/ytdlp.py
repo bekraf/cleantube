@@ -1,3 +1,4 @@
+import glob
 import json
 import logging
 import re
@@ -9,15 +10,17 @@ from typing import Callable
 log = logging.getLogger(__name__)
 
 _FS_BAD = re.compile(r"[\x00-\x1f/]")
+# yt-dlp's SponsorBlockPP prints exactly:
+#   [SponsorBlock] Found <N> segments in the SponsorBlock database
+# (or "No matching segments were found ..." when there are none).
 _SPONSOR_FOUND_RE = re.compile(
-    r"\[SponsorBlock\][^\n]*?(\d+)\s+\w+\s+segment", re.IGNORECASE
+    r"\[SponsorBlock\] Found (\d+) segments?", re.IGNORECASE
 )
-_SPONSOR_REMOVED_RE = re.compile(
-    r"Removed?\s+(\d+)\s+segments", re.IGNORECASE
-)
-_SPONSOR_CHAPTER_RE = re.compile(
-    r"\[ModifyChapters\][^\n]*Removing chapter", re.IGNORECASE
-)
+
+# Kill switch for a yt-dlp stalled on a dead connection; --socket-timeout
+# catches most hangs, this catches the rest. Downloads get no such cap.
+_METADATA_TIMEOUT = 600
+_SOCKET_TIMEOUT_ARGS = ["--socket-timeout", "30"]
 
 
 @dataclass(frozen=True)
@@ -36,16 +39,21 @@ class DownloadResult:
     sponsorblock_cuts: int
 
 
-def fetch_channel_video_ids(channel_url: str) -> list[str]:
-    """Return video IDs from a channel's /videos tab, newest first."""
+def fetch_channel_video_ids(channel_url: str, limit: int) -> list[str]:
+    """Return the newest `limit` video IDs from a channel's /videos tab."""
     cmd = [
         "yt-dlp",
         "--flat-playlist",
+        "--playlist-items", f":{limit}",
         "--print", "%(id)s",
         "--no-warnings",
+        *_SOCKET_TIMEOUT_ARGS,
         channel_url,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, check=False,
+        timeout=_METADATA_TIMEOUT,
+    )
     if result.returncode != 0:
         raise RuntimeError(
             f"yt-dlp flat playlist failed (rc={result.returncode}): "
@@ -61,9 +69,13 @@ def fetch_video_metadata(video_id: str) -> VideoMeta:
         "--dump-json",
         "--skip-download",
         "--no-warnings",
+        *_SOCKET_TIMEOUT_ARGS,
         url,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, check=False,
+        timeout=_METADATA_TIMEOUT,
+    )
     if result.returncode != 0:
         raise RuntimeError(
             f"yt-dlp metadata failed (rc={result.returncode}): "
@@ -101,6 +113,13 @@ def _sanitize_component(s: str) -> str:
     return _FS_BAD.sub("_", s).strip()
 
 
+def _truncate_utf8(s: str, max_bytes: int) -> str:
+    encoded = s.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return s
+    return encoded[:max_bytes].decode("utf-8", errors="ignore").rstrip()
+
+
 def build_output_path(
     download_dir: Path,
     channel_handle: str,
@@ -110,11 +129,13 @@ def build_output_path(
 ) -> Path:
     handle_bare = _sanitize_component(channel_handle.lstrip("@"))
     sanitized_title = _sanitize_component(title)
-    # Leave headroom inside the 255-byte component limit for the prefix/suffix.
-    suffix_len = len(handle_bare) + len(upload_date) + len(video_id) + len(" -  -  [].mp4")
-    max_title_len = max(20, 240 - suffix_len)
-    if len(sanitized_title) > max_title_len:
-        sanitized_title = sanitized_title[:max_title_len].rstrip()
+    # Filename components are capped at 255 *bytes* on Linux, and yt-dlp's
+    # intermediate files (".f<id>.<ext>", ".part") need room on top of the
+    # final name, so budget 240 bytes and truncate the title to fit.
+    overhead = len(
+        f"{handle_bare} - {upload_date} -  [{video_id}].mp4".encode("utf-8")
+    )
+    sanitized_title = _truncate_utf8(sanitized_title, max(20, 240 - overhead))
     filename = f"{handle_bare} - {upload_date} - {sanitized_title} [{video_id}].mp4"
     return download_dir / filename
 
@@ -140,6 +161,7 @@ def download_video(
         "--no-progress",
         "--no-warnings",
         "--newline",
+        *_SOCKET_TIMEOUT_ARGS,
         "-o", _escape_template(str(output_path)),
         url,
     ]
@@ -149,6 +171,9 @@ def download_video(
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        # Own session, so a terminal Ctrl-C reaches only the daemon and the
+        # in-flight download can run to completion (see requirement 4.4).
+        start_new_session=True,
     )
     register_process(proc)
     try:
@@ -168,7 +193,9 @@ def download_video(
 
     final_path = output_path
     if not final_path.exists():
-        matches = sorted(final_path.parent.glob(final_path.stem + ".*"))
+        # The stem contains "[<video_id>]", which glob reads as a character
+        # class — escape it or the fallback never matches.
+        matches = sorted(final_path.parent.glob(glob.escape(final_path.stem) + ".*"))
         if not matches:
             raise RuntimeError(f"output file not found: {final_path}")
         final_path = matches[0]
@@ -183,16 +210,8 @@ def download_video(
 
 
 def _count_sponsorblock_cuts(lines: list[str]) -> int:
-    chapter_removals = sum(1 for l in lines if _SPONSOR_CHAPTER_RE.search(l))
-    if chapter_removals:
-        return chapter_removals
-    for l in lines:
-        m = _SPONSOR_REMOVED_RE.search(l)
+    for line in lines:
+        m = _SPONSOR_FOUND_RE.search(line)
         if m:
             return int(m.group(1))
-    total = 0
-    for l in lines:
-        m = _SPONSOR_FOUND_RE.search(l)
-        if m:
-            total += int(m.group(1))
-    return total
+    return 0

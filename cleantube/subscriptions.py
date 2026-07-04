@@ -8,10 +8,12 @@ def read_subscriptions(path: Path) -> list[str]:
     if not path.exists():
         return []
     urls: list[str] = []
+    seen: set[str] = set()
     for line in path.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
+        if not stripped or stripped.startswith("#") or stripped in seen:
             continue
+        seen.add(stripped)
         urls.append(stripped)
     return urls
 

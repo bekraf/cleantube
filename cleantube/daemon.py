@@ -2,7 +2,6 @@ import logging
 import signal
 import subprocess
 import threading
-import time
 
 from .config import Config
 from .db import Database
@@ -16,6 +15,11 @@ from .ytdlp import (
 
 log = logging.getLogger("cleantube")
 
+# Newest-first feed entries to scan per channel per cycle. Bounds the work on
+# huge channels; anything beyond this within one poll interval is beyond a
+# realistic upload rate.
+_FEED_SCAN_LIMIT = 50
+
 
 class Daemon:
     def __init__(self, config: Config, db: Database):
@@ -23,29 +27,29 @@ class Daemon:
         self.db = db
         self._shutdown = threading.Event()
         self._current_proc: subprocess.Popen | None = None
-        self._proc_lock = threading.Lock()
 
     def install_signal_handlers(self) -> None:
         signal.signal(signal.SIGTERM, self._on_signal)
         signal.signal(signal.SIGINT, self._on_signal)
 
     def _on_signal(self, signum: int, _frame) -> None:
-        # Keep this minimal — set flag, defer logging to main loop.
+        # First signal: graceful — let the in-flight download finish.
+        # Second signal: the user insists; abandon the download.
+        if self._shutdown.is_set():
+            proc = self._current_proc
+            if proc is not None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
         self._shutdown.set()
 
     def _register_process(self, proc: subprocess.Popen | None) -> None:
-        with self._proc_lock:
-            self._current_proc = proc
+        self._current_proc = proc
 
     def _interruptible_sleep(self, seconds: float) -> bool:
         """Sleep up to `seconds`. Returns True if shutdown was requested."""
-        deadline = time.monotonic() + seconds
-        while not self._shutdown.is_set():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return False
-            time.sleep(min(0.5, remaining))
-        return True
+        return self._shutdown.wait(seconds)
 
     def run(self) -> None:
         self.install_signal_handlers()
@@ -89,7 +93,9 @@ class Daemon:
         videos_url = channel_videos_url(channel_url)
         log.info("channel_fetch_ids", extra={"channel_url": videos_url})
         try:
-            ids = fetch_channel_video_ids(videos_url)
+            ids = fetch_channel_video_ids(
+                videos_url, limit=max(_FEED_SCAN_LIMIT, self.config.backfill_count)
+            )
         except Exception as e:
             log.error(
                 "channel_fetch_failed",
@@ -161,9 +167,12 @@ class Daemon:
         else:
             most_recent = self.db.most_recent_upload_date(handle) or ""
             # Channel /videos feeds are newest-first. We walk it from the top,
-            # enqueueing every unknown ID whose upload_date is strictly newer
-            # than most_recent, and stop as soon as we hit an unknown ID at or
-            # below most_recent (everything after it is older still).
+            # enqueueing every unknown ID uploaded on or after most_recent, and
+            # stop at the first unknown ID that is strictly older (everything
+            # after it is older still). Upload dates only have day resolution,
+            # so "on or after" rather than "strictly newer": a second video
+            # published the same day as the last download would otherwise be
+            # missed forever.
             for vid in ids:
                 if self._shutdown.is_set():
                     return
@@ -183,7 +192,7 @@ class Daemon:
                     continue
                 if not meta.upload_date:
                     continue
-                if most_recent and meta.upload_date <= most_recent:
+                if most_recent and meta.upload_date < most_recent:
                     break
                 self.db.insert_pending_video(
                     video_id=meta.video_id,
