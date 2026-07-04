@@ -1,6 +1,8 @@
 # Cleantube configuration. All keys are optional; defaults shown below.
 
 # Number of newest videos to fetch the first time a channel is seen.
+# 0 = download nothing that already exists: record a baseline and only
+# download uploads published after the channel was first checked.
 backfill_count = 3
 
 # Seconds between poll cycles.

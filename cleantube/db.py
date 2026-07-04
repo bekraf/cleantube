@@ -7,7 +7,9 @@ CREATE TABLE IF NOT EXISTS channels (
     handle              TEXT PRIMARY KEY,
     url                 TEXT NOT NULL,
     first_seen_at       TEXT NOT NULL,
-    last_checked_at     TEXT
+    last_checked_at     TEXT,
+    watermark_date      TEXT     -- newest upload_date seen; uploads on or
+                                 -- after this date are candidates
 );
 
 CREATE TABLE IF NOT EXISTS videos (
@@ -20,7 +22,8 @@ CREATE TABLE IF NOT EXISTS videos (
     file_size_bytes     INTEGER,
     sponsorblock_cuts   INTEGER,
     downloaded_at       TEXT,
-    status              TEXT NOT NULL,
+    status              TEXT NOT NULL,   -- 'pending' | 'downloaded'
+                                         -- | 'permanently_failed' | 'skipped'
     attempt_count       INTEGER NOT NULL DEFAULT 0,
     last_error          TEXT,
     last_attempt_at     TEXT
@@ -44,6 +47,18 @@ class Database:
         self.conn.execute("PRAGMA journal_mode = WAL")
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(_SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(channels)")}
+        if "watermark_date" not in cols:
+            self.conn.execute("ALTER TABLE channels ADD COLUMN watermark_date TEXT")
+            # Seed from the previous implicit tracker (max stored upload_date).
+            self.conn.execute(
+                """UPDATE channels SET watermark_date =
+                   (SELECT MAX(upload_date) FROM videos
+                    WHERE videos.channel_handle = channels.handle)"""
+            )
 
     def close(self) -> None:
         self.conn.close()
@@ -62,24 +77,32 @@ class Database:
                 "UPDATE channels SET url = ? WHERE handle = ?", (url, handle)
             )
 
+    def handle_for_url(self, url: str) -> str | None:
+        row = self.conn.execute(
+            "SELECT handle FROM channels WHERE url = ?", (url,)
+        ).fetchone()
+        return row["handle"] if row else None
+
     def mark_channel_checked(self, handle: str) -> None:
         self.conn.execute(
             "UPDATE channels SET last_checked_at = ? WHERE handle = ?",
             (_now(), handle),
         )
 
-    def channel_has_any_videos(self, handle: str) -> bool:
+    def watermark(self, handle: str) -> str | None:
         row = self.conn.execute(
-            "SELECT 1 FROM videos WHERE channel_handle = ? LIMIT 1", (handle,)
+            "SELECT watermark_date FROM channels WHERE handle = ?", (handle,)
         ).fetchone()
-        return row is not None
+        return row["watermark_date"] if row else None
 
-    def most_recent_upload_date(self, handle: str) -> str | None:
-        row = self.conn.execute(
-            "SELECT MAX(upload_date) AS d FROM videos WHERE channel_handle = ?",
-            (handle,),
-        ).fetchone()
-        return row["d"] if row else None
+    def advance_watermark(self, handle: str, upload_date: str) -> None:
+        """Move the channel watermark forward; older dates are a no-op."""
+        self.conn.execute(
+            """UPDATE channels SET watermark_date = ?
+               WHERE handle = ?
+                 AND (watermark_date IS NULL OR watermark_date < ?)""",
+            (upload_date, handle, upload_date),
+        )
 
     def video_status(self, video_id: str) -> str | None:
         row = self.conn.execute(
@@ -92,7 +115,7 @@ class Database:
             "SELECT * FROM videos WHERE video_id = ?", (video_id,)
         ).fetchone()
 
-    def insert_pending_video(
+    def _insert_video(
         self,
         *,
         video_id: str,
@@ -100,15 +123,23 @@ class Database:
         title: str,
         upload_date: str,
         duration_seconds: int | None,
+        status: str,
     ) -> None:
         self.conn.execute(
             """INSERT INTO videos
                (video_id, channel_handle, title, upload_date,
                 duration_seconds, status)
-               VALUES (?, ?, ?, ?, ?, 'pending')
+               VALUES (?, ?, ?, ?, ?, ?)
                ON CONFLICT(video_id) DO NOTHING""",
-            (video_id, channel_handle, title, upload_date, duration_seconds),
+            (video_id, channel_handle, title, upload_date, duration_seconds, status),
         )
+
+    def insert_pending_video(self, **kwargs) -> None:
+        self._insert_video(status="pending", **kwargs)
+
+    def insert_skipped_video(self, **kwargs) -> None:
+        """Record a video as the follow-only baseline; never downloaded."""
+        self._insert_video(status="skipped", **kwargs)
 
     def mark_downloaded(
         self,

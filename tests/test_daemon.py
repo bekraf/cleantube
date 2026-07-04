@@ -84,6 +84,7 @@ def test_first_sight_backfills_most_recent(harness):
     assert downloaded == ["v1", "v2", "v3"]
     assert db.video_status("v1") == "downloaded"
     assert db.video_status("v4") is None
+    assert db.watermark("@chan") == "2026-07-01"
 
 
 def test_new_upload_detected_on_subsequent_run(harness):
@@ -100,6 +101,7 @@ def test_new_upload_detected_on_subsequent_run(harness):
         video_id="old", filepath=Path("/dl/old.mp4"), file_size_bytes=1,
         sponsorblock_cuts=0,
     )
+    db.advance_watermark("@chan", "2026-06-01")
 
     feed.extend(["new", "old", "ancient"])
     metas["new"] = make_meta("new", "2026-07-01")
@@ -110,6 +112,7 @@ def test_new_upload_detected_on_subsequent_run(harness):
     # Walk stops at the first unknown-and-older video; "old" is known so it
     # never needs a metadata fetch.
     assert meta_fetches == ["new", "ancient"]
+    assert db.watermark("@chan") == "2026-07-01"
 
 
 def test_same_day_upload_is_not_missed(harness):
@@ -128,6 +131,7 @@ def test_same_day_upload_is_not_missed(harness):
         video_id="a", filepath=Path("/dl/a.mp4"), file_size_bytes=1,
         sponsorblock_cuts=0,
     )
+    db.advance_watermark("@chan", "2026-07-01")
 
     feed.extend(["b", "a"])
     metas["b"] = make_meta("b", "2026-07-01")  # same day as "a"
@@ -146,6 +150,7 @@ def test_pending_video_is_retried(harness):
         upload_date="2026-06-01",
         duration_seconds=60,
     )
+    db.advance_watermark("@chan", "2026-06-01")
     feed.append("stuck")
 
     daemon._process_channel(CHANNEL_URL)
@@ -164,11 +169,75 @@ def test_permanently_failed_is_never_retried(harness):
         duration_seconds=60,
     )
     db.mark_permanently_failed("dead")
+    db.advance_watermark("@chan", "2026-06-01")
     feed.append("dead")
 
     daemon._process_channel(CHANNEL_URL)
     assert downloaded == []
     assert meta_fetches == []
+
+
+def test_backfill_zero_sets_baseline_and_follows(tmp_path, monkeypatch):
+    # Follow-only mode: nothing that exists at subscribe time is downloaded;
+    # only uploads that appear after the baseline are.
+    config = make_config(tmp_path, backfill_count=0)
+    db = Database(config.db_path)
+    daemon = Daemon(config, db)
+
+    feed = ["v1", "v0"]
+    metas = {
+        "v1": make_meta("v1", "2026-07-01"),
+        "v0": make_meta("v0", "2026-06-01"),
+    }
+    downloaded: list[str] = []
+    monkeypatch.setattr(
+        daemon_mod, "fetch_channel_video_ids", lambda url, limit: feed[:limit]
+    )
+    monkeypatch.setattr(daemon_mod, "fetch_video_metadata", lambda vid: metas[vid])
+
+    def fake_download(*, video_id, output_path, video_format, register_process):
+        downloaded.append(video_id)
+        return DownloadResult(
+            filepath=output_path, file_size_bytes=1, sponsorblock_cuts=0
+        )
+
+    monkeypatch.setattr(daemon_mod, "download_video", fake_download)
+
+    # First sight: baseline recorded, nothing downloaded.
+    daemon._process_channel(CHANNEL_URL)
+    assert downloaded == []
+    assert db.watermark("@chan") == "2026-07-01"
+    assert db.video_status("v1") == "skipped"
+
+    # Second cycle, nothing new: the baseline video must not be pulled in by
+    # the on-or-after date rule.
+    daemon._process_channel(CHANNEL_URL)
+    assert downloaded == []
+
+    # A new upload appears: only that one is downloaded.
+    feed.insert(0, "v2")
+    metas["v2"] = make_meta("v2", "2026-07-02")
+    daemon._process_channel(CHANNEL_URL)
+    assert downloaded == ["v2"]
+    assert db.watermark("@chan") == "2026-07-02"
+    db.close()
+
+
+def test_channel_url_handle_cached_after_discovery(harness):
+    # /channel/UC... URLs carry no handle. The first cycle discovers it via a
+    # metadata fetch; later cycles must reuse the handle stored in the DB.
+    daemon, db, feed, metas, downloaded, meta_fetches = harness
+    url = "https://www.youtube.com/channel/UCabc123"
+    feed.append("v1")
+    metas["v1"] = make_meta("v1", "2026-07-01")
+
+    daemon._process_channel(url)
+    assert downloaded == ["v1"]
+    assert db.handle_for_url(url) == "@chan"
+    fetches_after_first = len(meta_fetches)
+
+    daemon._process_channel(url)
+    assert len(meta_fetches) == fetches_after_first
 
 
 def test_download_failure_marks_permanent_after_max_attempts(

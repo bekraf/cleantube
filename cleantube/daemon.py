@@ -7,6 +7,7 @@ from .config import Config
 from .db import Database
 from .subscriptions import channel_videos_url, extract_handle, read_subscriptions
 from .ytdlp import (
+    VideoMeta,
     build_output_path,
     download_video,
     fetch_channel_video_ids,
@@ -86,7 +87,10 @@ class Daemon:
                 )
 
     def _process_channel(self, channel_url: str) -> None:
-        handle = extract_handle(channel_url)
+        # /channel/UC... URLs carry no handle; check the DB before falling
+        # back to metadata discovery so the yt-dlp round-trip happens only
+        # the first time a channel is seen.
+        handle = extract_handle(channel_url) or self.db.handle_for_url(channel_url)
         if handle:
             self.db.upsert_channel(handle, channel_url)
 
@@ -113,17 +117,18 @@ class Daemon:
                 self.db.mark_channel_checked(handle)
             return
 
+        newest_meta: VideoMeta | None = None
         if handle is None:
             # Learn the handle from the most recent video's metadata.
             try:
-                meta = fetch_video_metadata(ids[0])
+                newest_meta = fetch_video_metadata(ids[0])
             except Exception as e:
                 log.error(
                     "handle_discovery_failed",
                     extra={"channel_url": channel_url, "error": str(e)},
                 )
                 return
-            handle = meta.channel_handle
+            handle = newest_meta.channel_handle
             if handle is None:
                 log.warning(
                     "handle_unresolved", extra={"channel_url": channel_url}
@@ -131,15 +136,27 @@ class Daemon:
                 return
             self.db.upsert_channel(handle, channel_url)
 
-        candidates: list[str] = []
-        first_time = not self.db.channel_has_any_videos(handle)
+        def fetch_meta(vid: str) -> VideoMeta:
+            if newest_meta is not None and newest_meta.video_id == vid:
+                return newest_meta
+            return fetch_video_metadata(vid)
 
-        if first_time:
+        watermark = self.db.watermark(handle)
+
+        if watermark is None and self.config.backfill_count == 0:
+            self._set_baseline(handle, ids[0], fetch_meta)
+            return
+
+        candidates: list[str] = []
+        newest_seen = ""
+
+        if watermark is None:
+            # First time seeing this channel: backfill the newest uploads.
             for vid in ids[: self.config.backfill_count]:
                 if self._shutdown.is_set():
                     return
                 try:
-                    meta = fetch_video_metadata(vid)
+                    meta = fetch_meta(vid)
                 except Exception as e:
                     log.error(
                         "video_meta_failed",
@@ -159,31 +176,31 @@ class Daemon:
                     upload_date=meta.upload_date,
                     duration_seconds=meta.duration_seconds,
                 )
+                newest_seen = max(newest_seen, meta.upload_date)
                 candidates.append(meta.video_id)
             log.info(
                 "channel_first_seen",
                 extra={"channel": handle, "backfill_count": len(candidates)},
             )
         else:
-            most_recent = self.db.most_recent_upload_date(handle) or ""
             # Channel /videos feeds are newest-first. We walk it from the top,
-            # enqueueing every unknown ID uploaded on or after most_recent, and
-            # stop at the first unknown ID that is strictly older (everything
-            # after it is older still). Upload dates only have day resolution,
-            # so "on or after" rather than "strictly newer": a second video
-            # published the same day as the last download would otherwise be
-            # missed forever.
+            # enqueueing every unknown ID uploaded on or after the watermark,
+            # and stop at the first unknown ID that is strictly older
+            # (everything after it is older still). Upload dates only have day
+            # resolution, so "on or after" rather than "strictly newer": a
+            # second video published the same day as the watermark would
+            # otherwise be missed forever.
             for vid in ids:
                 if self._shutdown.is_set():
                     return
                 status = self.db.video_status(vid)
-                if status in ("downloaded", "permanently_failed"):
+                if status in ("downloaded", "permanently_failed", "skipped"):
                     continue
                 if status == "pending":
                     candidates.append(vid)
                     continue
                 try:
-                    meta = fetch_video_metadata(vid)
+                    meta = fetch_meta(vid)
                 except Exception as e:
                     log.error(
                         "video_meta_failed",
@@ -192,7 +209,7 @@ class Daemon:
                     continue
                 if not meta.upload_date:
                     continue
-                if most_recent and meta.upload_date < most_recent:
+                if meta.upload_date < watermark:
                     break
                 self.db.insert_pending_video(
                     video_id=meta.video_id,
@@ -201,21 +218,57 @@ class Daemon:
                     upload_date=meta.upload_date,
                     duration_seconds=meta.duration_seconds,
                 )
+                newest_seen = max(newest_seen, meta.upload_date)
                 candidates.append(meta.video_id)
             log.info(
                 "channel_candidates",
                 extra={"channel": handle, "candidate_count": len(candidates)},
             )
 
+        if newest_seen:
+            self.db.advance_watermark(handle, newest_seen)
         self.db.mark_channel_checked(handle)
 
         for vid in candidates:
             if self._shutdown.is_set():
                 return
             status = self.db.video_status(vid)
-            if status in ("downloaded", "permanently_failed"):
+            if status in ("downloaded", "permanently_failed", "skipped"):
                 continue
             self._download_one(handle, vid)
+
+    def _set_baseline(self, handle: str, newest_id: str, fetch_meta) -> None:
+        """Follow-only mode (backfill_count = 0): record the newest upload as
+        the watermark and download nothing that exists today. The video also
+        gets a 'skipped' row so the on-or-after date rule can never pull the
+        baseline video itself in later."""
+        try:
+            meta = fetch_meta(newest_id)
+        except Exception as e:
+            log.error(
+                "video_meta_failed",
+                extra={"channel": handle, "video_id": newest_id, "error": str(e)},
+            )
+            return
+        if not meta.upload_date:
+            log.warning(
+                "video_missing_upload_date",
+                extra={"channel": handle, "video_id": meta.video_id},
+            )
+            return
+        self.db.insert_skipped_video(
+            video_id=meta.video_id,
+            channel_handle=handle,
+            title=meta.title,
+            upload_date=meta.upload_date,
+            duration_seconds=meta.duration_seconds,
+        )
+        self.db.advance_watermark(handle, meta.upload_date)
+        self.db.mark_channel_checked(handle)
+        log.info(
+            "channel_baseline_set",
+            extra={"channel": handle, "baseline_date": meta.upload_date},
+        )
 
     def _download_one(self, channel_handle: str, video_id: str) -> None:
         row = self.db.get_video(video_id)
