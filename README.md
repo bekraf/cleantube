@@ -24,11 +24,11 @@ python -m cleantube                    # uses ./cleantube.toml if present
 python -m cleantube -c /path/to.toml
 ```
 
-Configuration lives in [cleantube.toml](cleantube.toml); every key is
-optional and documented there. [subscriptions.txt](subscriptions.txt) is one channel URL per
-line (`@handle` or `/channel/UC…`), `#` for comments, re-read every.
+Configuration lives in [cleantube.toml](cleantube.toml), every key is
+optional and documented there. 
 
-Example subscriptions file:
+[subscriptions.txt](subscriptions.txt) is one channel URL per
+line (`@handle` or `/channel/UC…`), `#` can be used for comments. Example subscriptions file:
 
 ```text
 # science
