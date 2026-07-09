@@ -4,8 +4,9 @@ import logging
 import re
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, NoReturn
 
 log = logging.getLogger(__name__)
 
@@ -22,6 +23,49 @@ _SPONSOR_FOUND_RE = re.compile(
 _METADATA_TIMEOUT = 600
 _SOCKET_TIMEOUT_ARGS = ["--socket-timeout", "30"]
 
+# yt-dlp failure messages that mean the video or channel is inaccessible or
+# not ready — expected conditions, not operational failures. The daemon logs
+# these as warnings. Deliberately NOT matched: "Sign in to confirm you're not
+# a bot" (rate-limit signal, must stay an error) and "This channel does not
+# exist" (actionable: fix subscriptions.txt).
+_UNAVAILABLE_PATTERNS: list[tuple[str, re.Pattern]] = [
+    ("members_only",
+     re.compile(r"members-only content|channel's members on level", re.I)),
+    ("age_restricted", re.compile(r"Sign in to confirm your age", re.I)),
+    ("premiere",
+     re.compile(r"Premieres in|This live event will begin in", re.I)),
+    ("unavailable",
+     re.compile(
+         r"Video unavailable|This video is not available"
+         r"|This video has been removed", re.I)),
+    ("private", re.compile(r"Private video", re.I)),
+    ("no_videos_tab",
+     re.compile(r"This channel does not have a videos tab", re.I)),
+]
+
+
+class UnavailableError(RuntimeError):
+    """The video or channel is inaccessible (members-only, age-restricted,
+    deleted, premiere not yet live, ...). Expected — callers should log this
+    as a warning, not an error."""
+
+    def __init__(self, message: str, reason: str):
+        super().__init__(message)
+        self.reason = reason
+
+
+def _raise_ytdlp_failure(message: str) -> NoReturn:
+    for reason, pattern in _UNAVAILABLE_PATTERNS:
+        if pattern.search(message):
+            raise UnavailableError(message, reason)
+    raise RuntimeError(message)
+
+
+# A premiere is downloadable as a normal video only after it has finished
+# airing: release + duration + a margin for YouTube to process the VOD.
+_PREMIERE_MARGIN_SECONDS = 900
+_PREMIERE_UNKNOWN_DURATION_SECONDS = 3600
+
 
 @dataclass(frozen=True)
 class VideoMeta:
@@ -30,6 +74,8 @@ class VideoMeta:
     upload_date: str  # YYYY-MM-DD
     duration_seconds: int | None
     channel_handle: str | None  # "@handle" or None
+    available_at: str | None = None  # ISO UTC; set for upcoming premieres,
+                                     # do not download before this moment
 
 
 @dataclass(frozen=True)
@@ -55,7 +101,7 @@ def fetch_channel_video_ids(channel_url: str, limit: int) -> list[str]:
         timeout=_METADATA_TIMEOUT,
     )
     if result.returncode != 0:
-        raise RuntimeError(
+        _raise_ytdlp_failure(
             f"yt-dlp flat playlist failed (rc={result.returncode}): "
             f"{result.stderr.strip()[-500:]}"
         )
@@ -69,6 +115,10 @@ def fetch_video_metadata(video_id: str) -> VideoMeta:
         "--dump-json",
         "--skip-download",
         "--no-warnings",
+        # Upcoming premieres have no formats yet; without this flag the dump
+        # fails with "Premieres in N hours" and we would learn nothing. With
+        # it we get live_status and release_timestamp to schedule from.
+        "--ignore-no-formats-error",
         *_SOCKET_TIMEOUT_ARGS,
         url,
     ]
@@ -77,17 +127,40 @@ def fetch_video_metadata(video_id: str) -> VideoMeta:
         timeout=_METADATA_TIMEOUT,
     )
     if result.returncode != 0:
-        raise RuntimeError(
+        _raise_ytdlp_failure(
             f"yt-dlp metadata failed (rc={result.returncode}): "
             f"{result.stderr.strip()[-500:]}"
         )
     info = json.loads(result.stdout)
 
+    duration = info.get("duration")
+    release_ts = info.get("release_timestamp")
+
     raw_date = info.get("upload_date") or ""
     if len(raw_date) == 8 and raw_date.isdigit():
         upload_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
+    elif release_ts:
+        # Upcoming premieres often carry no upload_date yet; the scheduled
+        # release date stands in for it.
+        upload_date = datetime.fromtimestamp(release_ts, timezone.utc).strftime(
+            "%Y-%m-%d"
+        )
     else:
         upload_date = ""
+
+    available_at = None
+    if info.get("live_status") == "is_upcoming":
+        if release_ts:
+            ready = datetime.fromtimestamp(release_ts, timezone.utc) + timedelta(
+                seconds=(duration or _PREMIERE_UNKNOWN_DURATION_SECONDS)
+                + _PREMIERE_MARGIN_SECONDS
+            )
+        else:
+            # Schedule unknown: check again in an hour.
+            ready = datetime.now(timezone.utc) + timedelta(
+                seconds=_PREMIERE_UNKNOWN_DURATION_SECONDS
+            )
+        available_at = ready.isoformat()
 
     handle = None
     candidate = info.get("uploader_id") or info.get("channel_url", "")
@@ -99,13 +172,13 @@ def fetch_video_metadata(video_id: str) -> VideoMeta:
             if m:
                 handle = "@" + m.group(1)
 
-    duration = info.get("duration")
     return VideoMeta(
         video_id=info["id"],
         title=info.get("title", "") or "",
         upload_date=upload_date,
         duration_seconds=int(duration) if duration else None,
         channel_handle=handle,
+        available_at=available_at,
     )
 
 
@@ -189,7 +262,7 @@ def download_video(
 
     if rc != 0:
         tail = "\n".join(output_lines[-10:])
-        raise RuntimeError(f"yt-dlp download failed (rc={rc}): {tail}")
+        _raise_ytdlp_failure(f"yt-dlp download failed (rc={rc}): {tail}")
 
     final_path = output_path
     if not final_path.exists():

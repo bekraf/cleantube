@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 _SCHEMA = """
@@ -26,7 +26,9 @@ CREATE TABLE IF NOT EXISTS videos (
                                          -- | 'permanently_failed' | 'skipped'
     attempt_count       INTEGER NOT NULL DEFAULT 0,
     last_error          TEXT,
-    last_attempt_at     TEXT
+    last_attempt_at     TEXT,
+    available_at        TEXT             -- queue offers the video only from
+                                         -- this moment (upcoming premieres)
 );
 
 CREATE INDEX IF NOT EXISTS idx_videos_channel_date
@@ -59,6 +61,11 @@ class Database:
                    (SELECT MAX(upload_date) FROM videos
                     WHERE videos.channel_handle = channels.handle)"""
             )
+        video_cols = {
+            row["name"] for row in self.conn.execute("PRAGMA table_info(videos)")
+        }
+        if "available_at" not in video_cols:
+            self.conn.execute("ALTER TABLE videos ADD COLUMN available_at TEXT")
 
     def close(self) -> None:
         self.conn.close()
@@ -115,6 +122,38 @@ class Database:
             "SELECT * FROM videos WHERE video_id = ?", (video_id,)
         ).fetchone()
 
+    def pending_count(self) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM videos WHERE status = 'pending'"
+        ).fetchone()
+        return int(row["n"])
+
+    def next_pending_video(self, retry_delay_seconds: float) -> sqlite3.Row | None:
+        """Oldest queued video that is eligible for download. A video
+        attempted within the last `retry_delay_seconds` is held back, so a
+        failing download is retried at the old once-per-cycle cadence instead
+        of in a tight loop. Videos with an `available_at` in the future
+        (upcoming premieres) are not offered yet."""
+        now = datetime.now(timezone.utc)
+        cutoff = (now - timedelta(seconds=retry_delay_seconds)).isoformat()
+        return self.conn.execute(
+            """SELECT * FROM videos
+               WHERE status = 'pending'
+                 AND (last_attempt_at IS NULL OR last_attempt_at <= ?)
+                 AND (available_at IS NULL OR available_at <= ?)
+               ORDER BY upload_date ASC, rowid ASC
+               LIMIT 1""",
+            (cutoff, now.isoformat()),
+        ).fetchone()
+
+    def set_available_at(self, video_id: str, available_at: str) -> None:
+        """Defer a queued video: the queue will not offer it before this
+        moment. Does not touch status or attempt counters."""
+        self.conn.execute(
+            "UPDATE videos SET available_at = ? WHERE video_id = ?",
+            (available_at, video_id),
+        )
+
     def _insert_video(
         self,
         *,
@@ -124,14 +163,16 @@ class Database:
         upload_date: str,
         duration_seconds: int | None,
         status: str,
+        available_at: str | None = None,
     ) -> None:
         self.conn.execute(
             """INSERT INTO videos
                (video_id, channel_handle, title, upload_date,
-                duration_seconds, status)
-               VALUES (?, ?, ?, ?, ?, ?)
+                duration_seconds, status, available_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(video_id) DO NOTHING""",
-            (video_id, channel_handle, title, upload_date, duration_seconds, status),
+            (video_id, channel_handle, title, upload_date, duration_seconds,
+             status, available_at),
         )
 
     def insert_pending_video(self, **kwargs) -> None:

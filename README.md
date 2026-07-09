@@ -18,10 +18,17 @@ anyway.
   record a baseline — useful for big subscription lists where you only want
   videos published from that point on.
 - After that, each channel has a watermark date in the database: anything
-  newer is downloaded, one at a time, with a cooldown after each download for
-  rate-limit safety.
-- Failed downloads are retried on later cycles, up to `max_download_attempts`
-  (default 3), then marked permanently failed and never touched again.
+  newer is added to a download queue.
+- The queue is worked through one video at a time, oldest upload first, with
+  `post_download_cooldown_seconds` of spacing between downloads. Scanning and
+  downloading are decoupled, so the spacing can be generous (rate-limit
+  safety) without delaying the scans.
+- Upcoming premieres are queued with an explicit availability moment
+  (scheduled release + video duration + a processing margin) and are only
+  offered for download once they have aired in full.
+- Failed downloads re-enter the queue after a poll interval, up to
+  `max_download_attempts` (default 3), then marked permanently failed and
+  never touched again.
 
 Videos land flat in one directory as
 `<channel> - <date> - <title> [<video-id>].mp4`. All state lives in a single

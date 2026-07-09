@@ -3,13 +3,16 @@
 # Number of newest videos to fetch the first time a channel is seen.
 # 0 = download nothing that already exists: record a baseline and only
 # download uploads published after the channel was first checked.
-backfill_count = 3
+backfill_count = 1
 
 # Seconds between poll cycles.
-poll_interval_seconds = 3600
+poll_interval_seconds = 4000
 
-# Seconds to wait after each successful download (rate-limit safety).
-post_download_cooldown_seconds = 1800
+# Seconds between queued downloads. New videos found while scanning go into
+# a download queue that is worked through one video at a time with this much
+# spacing; scanning is not delayed by it, so the value can be generous
+# (rate-limit safety).
+post_download_cooldown_seconds = 2500
 
 # Where downloaded videos are written. Flat directory, no per-channel subdirs.
 download_dir = "./cleantube/downloaded"
@@ -18,7 +21,7 @@ download_dir = "./cleantube/downloaded"
 video_format = "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]"
 
 # How many failed attempts before a video is marked permanently_failed.
-max_download_attempts = 3
+max_download_attempts = 2
 
 # SQLite database path. Single source of truth for downloaded state.
 db_path = "./cleantube/cleantube.db"

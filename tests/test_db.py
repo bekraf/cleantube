@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -84,6 +85,51 @@ def test_watermark_advances_only_forward(db):
     assert db.watermark("@chan") == "2026-07-01"
 
 
+def test_next_pending_video_pops_oldest_first(db):
+    db.upsert_channel("@chan", "url")
+    assert db.pending_count() == 0
+    _add_pending(db, "newer", "2026-07-01")
+    _add_pending(db, "older", "2026-06-01")
+    assert db.pending_count() == 2
+
+    row = db.next_pending_video(retry_delay_seconds=3600)
+    assert row["video_id"] == "older"
+    db.mark_downloaded(
+        video_id="older", filepath=Path("/dl/older.mp4"), file_size_bytes=1,
+        sponsorblock_cuts=0,
+    )
+    assert db.next_pending_video(retry_delay_seconds=3600)["video_id"] == "newer"
+    assert db.pending_count() == 1
+
+
+def test_next_pending_video_respects_retry_holdback(db):
+    db.upsert_channel("@chan", "url")
+    _add_pending(db, "v1", "2026-06-01")
+    db.record_failure("v1", "boom")
+    # Attempted just now: held back for the retry delay, eligible once it
+    # has passed (delay 0 puts the cutoff at "now").
+    assert db.next_pending_video(retry_delay_seconds=3600) is None
+    assert db.next_pending_video(retry_delay_seconds=0)["video_id"] == "v1"
+
+
+def test_next_pending_video_gates_on_available_at(db):
+    db.upsert_channel("@chan", "url")
+    airs_at = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+    db.insert_pending_video(
+        video_id="prem",
+        channel_handle="@chan",
+        title="premiere",
+        upload_date="2026-07-10",
+        duration_seconds=60,
+        available_at=airs_at,
+    )
+    assert db.next_pending_video(retry_delay_seconds=3600) is None
+
+    aired = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    db.set_available_at("prem", aired)
+    assert db.next_pending_video(retry_delay_seconds=3600)["video_id"] == "prem"
+
+
 def test_skipped_video_status(db):
     db.upsert_channel("@chan", "url")
     db.insert_skipped_video(
@@ -125,4 +171,7 @@ def test_migration_seeds_watermark_from_existing_rows(tmp_path):
     db = Database(path)
     assert db.watermark("@chan") == "2026-06-15"
     assert db.watermark("@empty") is None
+    # The available_at column is added on the fly too.
+    db.set_available_at("v1", "2026-07-01T00:00:00+00:00")
+    assert db.get_video("v1")["available_at"] == "2026-07-01T00:00:00+00:00"
     db.close()
