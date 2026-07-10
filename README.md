@@ -24,7 +24,8 @@ python -m cleantube                    # uses ./cleantube.toml if present
 python -m cleantube -c /path/to.toml
 ```
 
-Configuration lives in [cleantube.toml](cleantube.toml), every key is
+Configuration lives in `cleantube.toml` (gitignored, machine-local); copy
+[cleantube.example.toml](cleantube.example.toml) to get started. Every key is
 optional and documented there. 
 
 [subscriptions.txt](subscriptions.txt) is one channel URL per

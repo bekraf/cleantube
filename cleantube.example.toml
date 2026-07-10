@@ -1,4 +1,5 @@
-# Cleantube configuration. All keys are optional; defaults shown below.
+# Cleantube configuration. Copy this file to cleantube.toml (gitignored,
+# machine-local) and adjust. All keys are optional; defaults shown below.
 
 # Number of newest videos to fetch the first time a channel is seen.
 # 0 = download nothing that already exists: record a baseline and only
