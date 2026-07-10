@@ -16,6 +16,9 @@ class Config:
     max_download_attempts: int
     db_path: Path
     subscriptions_path: Path
+    web_enabled: bool
+    web_host: str
+    web_port: int
 
 
 _DEFAULTS = {
@@ -27,6 +30,9 @@ _DEFAULTS = {
     "max_download_attempts": 3,
     "db_path": "./cleantube/cleantube.db",
     "subscriptions_path": "./subscriptions.txt",
+    "web_enabled": True,
+    "web_host": "0.0.0.0",
+    "web_port": 8320,
 }
 
 
@@ -47,6 +53,9 @@ def load_config(path: Path) -> Config:
         max_download_attempts=int(merged["max_download_attempts"]),
         db_path=Path(merged["db_path"]),
         subscriptions_path=Path(merged["subscriptions_path"]),
+        web_enabled=bool(merged["web_enabled"]),
+        web_host=str(merged["web_host"]),
+        web_port=int(merged["web_port"]),
     )
     if config.backfill_count < 0:
         raise ValueError("backfill_count must be >= 0")
@@ -56,4 +65,6 @@ def load_config(path: Path) -> Config:
         raise ValueError("post_download_cooldown_seconds must be >= 0")
     if config.max_download_attempts < 1:
         raise ValueError("max_download_attempts must be >= 1")
+    if not 1 <= config.web_port <= 65535:
+        raise ValueError("web_port must be between 1 and 65535")
     return config

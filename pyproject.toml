@@ -17,6 +17,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = ["cleantube"]
 
+[tool.setuptools.package-data]
+cleantube = ["webui/*"]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]

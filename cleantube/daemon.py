@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 from .config import Config
 from .db import Database
+from .status import DaemonStatus
 from .subscriptions import channel_videos_url, extract_handle, read_subscriptions
 from .ytdlp import (
     UnavailableError,
@@ -48,10 +49,19 @@ _QUEUE_RECHECK_SECONDS = 60.0
 _PREMIERE_DEFER_SECONDS = 3600
 
 
+def _utcnow_iso(seconds_ahead: float = 0.0) -> str:
+    return (
+        datetime.now(timezone.utc) + timedelta(seconds=seconds_ahead)
+    ).isoformat()
+
+
 class Daemon:
-    def __init__(self, config: Config, db: Database):
+    def __init__(
+        self, config: Config, db: Database, status: DaemonStatus | None = None
+    ):
         self.config = config
         self.db = db
+        self.status = status or DaemonStatus()
         self._shutdown = threading.Event()
         self._current_proc: subprocess.Popen | None = None
 
@@ -81,6 +91,10 @@ class Daemon:
     def run(self) -> None:
         self.install_signal_handlers()
         log.info("daemon_start")
+        now_iso = _utcnow_iso()
+        self.status.update(
+            started_at=now_iso, next_scan_at=now_iso, next_download_at=now_iso
+        )
         # Scanning and downloading run interleaved on independent deadlines:
         # scans enqueue pending videos, the queue is drained one video at a
         # time with post_download_cooldown_seconds of spacing. Deadlines are
@@ -97,6 +111,9 @@ class Daemon:
                     except Exception as e:
                         log.exception("cycle_error", extra={"error": str(e)})
                     next_scan = time.monotonic() + self.config.poll_interval_seconds
+                    self.status.update(
+                        next_scan_at=_utcnow_iso(self.config.poll_interval_seconds)
+                    )
                     log.info(
                         "cycle_complete",
                         extra={
@@ -112,6 +129,9 @@ class Daemon:
                     if success is None:
                         # Queue empty (or everything is in retry hold-back).
                         next_download = time.monotonic() + _QUEUE_RECHECK_SECONDS
+                        self.status.update(
+                            next_download_at=_utcnow_iso(_QUEUE_RECHECK_SECONDS)
+                        )
                     elif success:
                         log.info(
                             "download_cooldown",
@@ -124,8 +144,16 @@ class Daemon:
                             time.monotonic()
                             + self.config.post_download_cooldown_seconds
                         )
-                    # No cooldown after a failure: the failed video is held
-                    # back by the queue itself, the next one is tried at once.
+                        self.status.update(
+                            next_download_at=_utcnow_iso(
+                                self.config.post_download_cooldown_seconds
+                            )
+                        )
+                    else:
+                        # No cooldown after a failure: the failed video is
+                        # held back by the queue itself, the next one is
+                        # tried at once.
+                        self.status.update(next_download_at=_utcnow_iso())
                     continue
                 wait = min(next_scan, next_download) - time.monotonic()
                 if wait > 0 and self._interruptible_sleep(wait):
@@ -136,6 +164,10 @@ class Daemon:
     def _run_cycle(self) -> None:
         urls = read_subscriptions(self.config.subscriptions_path)
         log.info("cycle_start", extra={"channel_count": len(urls)})
+        self.status.update(
+            last_scan_started_at=_utcnow_iso(),
+            last_scan_channel_count=len(urls),
+        )
         for channel_url in urls:
             if self._shutdown.is_set():
                 return
@@ -146,6 +178,7 @@ class Daemon:
                     "channel_error",
                     extra={"channel_url": channel_url, "error": str(e)},
                 )
+        self.status.update(last_scan_finished_at=_utcnow_iso())
 
     def _process_channel(self, channel_url: str) -> None:
         # /channel/UC... URLs carry no handle; check the DB before falling
@@ -368,6 +401,14 @@ class Daemon:
             },
         )
 
+        self.status.update(
+            current_download={
+                "video_id": video_id,
+                "channel": channel_handle,
+                "title": title,
+                "started_at": _utcnow_iso(),
+            }
+        )
         try:
             result = download_video(
                 video_id=video_id,
@@ -412,6 +453,8 @@ class Daemon:
                     },
                 )
             return False
+        finally:
+            self.status.update(current_download=None)
 
         self.db.mark_downloaded(
             video_id=video_id,

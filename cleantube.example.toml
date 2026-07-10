@@ -29,3 +29,10 @@ db_path = "./cleantube/cleantube.db"
 
 # Subscription file location (one channel URL per line, # comments allowed).
 subscriptions_path = "./subscriptions.txt"
+
+# Web portal (dashboard, download diary, video details). No authentication:
+# intended for the local network only. Set web_host = "127.0.0.1" to restrict
+# it to the machine itself.
+web_enabled = true
+web_host = "0.0.0.0"
+web_port = 8320

@@ -36,3 +36,18 @@ line (`@handle` or `/channel/UC…`), `#` can be used for comments. Example subs
 https://www.youtube.com/@kurzgesagt
 https://www.youtube.com/channel/UCsXVk37bltHxD1rDPwtNM8Q
 ```
+
+## Web portal
+
+The daemon serves a small web portal (default `http://<host>:8320`, stdlib
+only, no dependencies) with three tabs:
+
+- **Dashboard** — live stats: scan/download schedule, queue, library totals,
+  error rates and download charts.
+- **Dagboek** — a diary timeline; scroll up through the download history
+  (failures tinted red), scroll down into the queued future with estimated
+  download times. Click any video to jump to its detail page.
+- **Video** — every database field of the selected (or latest) video.
+
+There is no authentication; it is meant for the local network. Configure with
+`web_enabled`, `web_host` and `web_port` in `cleantube.toml`.

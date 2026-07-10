@@ -23,6 +23,9 @@ def make_config(tmp_path, **overrides) -> Config:
         max_download_attempts=3,
         db_path=tmp_path / "test.db",
         subscriptions_path=tmp_path / "subscriptions.txt",
+        web_enabled=False,
+        web_host="127.0.0.1",
+        web_port=0,
     )
     values.update(overrides)
     return Config(**values)

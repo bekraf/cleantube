@@ -8,6 +8,20 @@ def test_defaults_when_file_missing(tmp_path):
     assert config.backfill_count == 3
     assert config.poll_interval_seconds == 3600
     assert config.max_download_attempts == 3
+    assert config.web_enabled is True
+    assert config.web_host == "0.0.0.0"
+    assert config.web_port == 8320
+
+
+def test_web_overrides(tmp_path):
+    path = tmp_path / "cleantube.toml"
+    path.write_text(
+        'web_enabled = false\nweb_host = "127.0.0.1"\nweb_port = 9000\n'
+    )
+    config = load_config(path)
+    assert config.web_enabled is False
+    assert config.web_host == "127.0.0.1"
+    assert config.web_port == 9000
 
 
 def test_overrides(tmp_path):
@@ -34,6 +48,8 @@ def test_unknown_key_warns_but_loads(tmp_path, caplog):
         "poll_interval_seconds = 0",
         "post_download_cooldown_seconds = -5",
         "max_download_attempts = 0",
+        "web_port = 0",
+        "web_port = 70000",
     ],
 )
 def test_invalid_values_rejected(tmp_path, toml_line):

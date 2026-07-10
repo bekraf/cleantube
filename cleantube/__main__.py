@@ -9,6 +9,8 @@ from .config import load_config
 from .daemon import Daemon
 from .db import Database
 from .logging_setup import setup_logging
+from .status import DaemonStatus
+from .web import start_web_server
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -52,10 +54,14 @@ def main(argv: list[str] | None = None) -> int:
     config.download_dir.mkdir(parents=True, exist_ok=True)
     db = Database(config.db_path)
 
-    daemon = Daemon(config, db)
+    status = DaemonStatus()
+    web = start_web_server(config, status)
+    daemon = Daemon(config, db, status)
     try:
         daemon.run()
     finally:
+        if web is not None:
+            web.shutdown()
         db.close()
     return 0
 
